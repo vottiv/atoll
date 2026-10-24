@@ -1,0 +1,39 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+Atoll (source module and files still named Island) is a macOS (14+, arm64) menu-bar-less "Dynamic Island" for the notch: a borderless panel at the top of the screen that shows the current Now Playing track with artwork, equalizer, seek bar and transport controls. Pure Swift/SwiftUI/AppKit, no Xcode project, no SwiftPM, no tests. UI strings and comments are in Russian.
+
+## Build & run
+
+```sh
+./build.sh                 # swiftc -> Atoll.app (rebuilds from scratch), then codesigns
+open Atoll.app            # normal run (LSUIElement: no Dock icon)
+Atoll.app/Contents/MacOS/Atoll --preview    # run with fake track data
+Atoll.app/Contents/MacOS/Atoll --snapshot   # render screenshots/{collapsed,hovered,expanded}.png into CWD and exit
+```
+
+- `build.sh` lists source files explicitly — **a new `.swift` file must be added to the `swiftc` invocation** there.
+- Codesigning uses the first Apple Development identity found in the keychain (override with `SIGN_IDENTITY`; falls back to ad-hoc) with identifier `local.island.notch`. A stable signature matters: the Accessibility (TCC) grant is tied to it, so ad-hoc re-signing makes macOS drop the permission.
+- `build.sh` also compiles `Helper/adapter.m` into `Atoll.app/Contents/Resources/adapter.dylib` and copies `Helper/run.pl` next to it (see MediaRemote below).
+- `Atoll.app/Contents/MacOS/Atoll --selftest` drives the real model → service → player path (play/pause, seek, next, previous) against whatever player is currently active and prints `SELFTEST PASS/FAIL`; it needs an active Now Playing session and will actually skip tracks.
+- Debug/diagnostic CLI flags are handled at the top of `AppDelegate.applicationDidFinishLaunching` in `IslandApp.swift` (`--ax`, `--probe`, `--press-toggle|next|prev`, `--media-test`, `--check`, `--status`, `--seek-probe`, `--seek-test`, `--shot`). They call into `DesktopPlayerReader` and `exit(0)`. `--status` writes to `/tmp/island-status.txt`.
+- `--snapshot` / `--preview` use `SnapshotWriter` and `PreviewArtwork` and don't touch real media state; use them to verify UI changes (screenshots are checked in under `screenshots/`).
+
+## Architecture
+
+- `IslandApp.swift` — `@main`, `IslandModel` (the single `ObservableObject` state: track info, `isExpanded`, `isHovered`, notch size, callbacks `onToggle/onNext/onPrevious/...`), `IslandMetrics`/`DisplayLayout` (notch geometry per display), `AppDelegate`, `IslandWindowController` (positions/animates the window, hover and outside-click monitors), `IslandPanel` (non-activating `NSPanel`), `IslandContainer`/`IslandHostingView` (AppKit glue around the SwiftUI view).
+- `IslandView.swift` — SwiftUI UI: `IslandView`, `EqualizerView`, `SeekBar`, transport buttons, and `ArtworkPalette` (derives accent colours from artwork), `PreviewArtwork`.
+- `NowPlayingService.swift` (largest file) — data + control layer, two sources:
+  1. `NowPlayingService` + `MediaRemoteBridge.swift`: since macOS 15.4 the private MediaRemote returns nothing to non-Apple processes (verified on 26.6), so every call (get info, send command, set elapsed) is run through the Apple-signed `/usr/bin/perl` (`Helper/run.pl`), which loads `adapter.dylib` (`Helper/adapter.m`) and prints JSON. Do not call MediaRemote directly from the Swift process. Covers Yandex Music, YouTube in Chrome, Spotify, Music, etc.
+  2. `DesktopPlayerReader`: fallback for the Yandex Music desktop app (`ru.yandex.desktop.music`), which was previously invisible to the blocked MediaRemote (now it appears via the bridge too). It reads the track by scraping the app's UI through the Accessibility API (`AXUIElement` window scans, labelled elements), captures artwork from window screenshots, and controls playback by pressing AX buttons, posting media keys, or clicking the seek bar. Only used as a fallback and needs Accessibility permission; the UI no longer nags about it (`needsPlayerAccess` is forced false).
+- `AudioSpectrum.swift` — `SpectrumModel` (5 band levels, `isLive`) and `AudioSpectrum`, which taps system audio via a Core Audio process tap (needs the system-audio-recording permission, `NSAudioCaptureUsageDescription` in Info.plist), FFTs it with Accelerate and feeds `EqualizerView`. Started/stopped from `model.$isPlaying` in `AppDelegate`; without signal for ~2.5 s the EQ falls back to a procedural animation. `ISLAND_SPECTRUM_LOG=1` prints levels to stderr.
+- Look & animation: no custom colors or theme logic — fills are system Liquid Glass (`glassEffect`): `.clear` when collapsed (matches the Dock), `.regular` when expanded (matches system widgets); text/controls follow the system color scheme. A near-invisible white underlay (`opacity 0.07`) under the glass is required: fully transparent window pixels let clicks fall through to the app below. The shape is `NotchShape` (concave top ears, convex bottom). The panel is resized **instantly, never animated** (`IslandWindowController`): `model.openWidget()` first fires `onWillExpand` (window grows), then sets `isExpanded` 50 ms later so SwiftUI does not animate the container resize (that made the island grow from a corner); on close the window shrinks 0.7 s after the morph. `IslandView` morphs the shape with one spring (`shapeSize`). Hover grows the collapsed shape by `hoverGrowX/Y`.
+- Expanded layout: the top strip (height `notchHeight`, the physical island) holds the source app's icon on the left (`model.sourceIcon`, from the MediaRemote client bundle ID returned by `adapter.m` as `_bundle`) and the equalizer on the right; artwork and the text/seek/controls column sit below that line. After a seek, `NowPlayingService.reconcileAfterSeek` ignores the player's stale elapsed time for up to 5 s so the timeline doesn't flash the old position.
+- Input: clicking the collapsed island or the empty strip above the camera in the expanded one calls `model.toggleWidget()`; any click outside the panel collapses it (global/local monitors in `AppDelegate.watchClicksOutside`).
+- `--cycle` auto-toggles the island every 3 s (animation debugging); `ISLAND_STATE ...` lines on stderr log expand/hover changes. Synthetic mouse events (CGEvent) do reach the app in this setup and were used to test clicks/hover.
+- `Snapshot.swift` — `SnapshotWriter`, offscreen rendering of the island into composed PNG scenes (uses `model.usesFlatBackdrop` and `locksExpansion` to get deterministic output).
+
+Data flow: `NowPlayingService` writes into `IslandModel`; `IslandView` observes the model; user actions in the view call back through the model's `on*` closures to `NowPlayingService`, which picks MediaRemote or `DesktopPlayerReader` depending on `controlsDesktopPlayer`.
