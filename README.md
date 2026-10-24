@@ -22,12 +22,22 @@
   <img src="screenshots/expanded.png" alt="Развёрнутый" width="380">
 </p>
 
+## Скачать
+
+Готовое приложение лежит в [свежем релизе](https://github.com/vottiv/atoll/releases): скачайте `Atoll.zip`, распакуйте и перетащите `Atoll.app` в «Программы». Собирать ничего не нужно.
+
+Приложение не нотаризовано, поэтому при первом запуске macOS его заблокирует. Нажмите правой кнопкой по `Atoll.app` → «Открыть», либо снимите карантин:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Atoll.app
+```
+
 ## Требования
 
 - macOS 14+ (Apple Silicon). Liquid Glass включается на macOS 26, на более старых системах используется обычная подложка.
 - Xcode Command Line Tools (`xcode-select --install`).
 
-## Сборка и запуск
+## Сборка из исходников
 
 ```sh
 ./build.sh
