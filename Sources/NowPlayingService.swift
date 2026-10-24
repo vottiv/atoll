@@ -40,6 +40,9 @@ final class NowPlayingService {
     private var wasPlaying: Set<String> = []
     private var artworkCache: [String: (token: Int, title: String, image: NSImage)] = [:]
     private var noticeToken = 0
+    private var pendingBrowserAction: (Source, BrowserControl.Action)?
+    /// Подсказка относится к одному источнику и одному треку: в другом плеере её быть не должно.
+    private var noticeOwner: (bundle: String, title: String)?
 
     private struct Sample {
         var duration: TimeInterval = 0
@@ -192,15 +195,65 @@ final class NowPlayingService {
     private func runBrowser(_ source: Source, _ action: BrowserControl.Action) {
         BrowserControl.run(bundle: source.bundle, title: source.title, action: action) { [weak self] problem in
             guard let problem else { return }
-            DispatchQueue.main.async { self?.showNotice(problem) }
+            DispatchQueue.main.async { self?.handle(problem, source: source, retry: action) }
         }
     }
 
-    private func showNotice(_ text: String) {
+    private func handle(_ problem: BrowserControl.Problem, source: Source, retry action: BrowserControl.Action) {
+        let name = appName(source.bundle)
+        switch problem {
+        case .javaScriptDisabled:
+            pendingBrowserAction = (source, action)
+            showNotice("Нажми, чтобы разрешить управление в \(name)", for: source, actionable: true)
+        case .automationDenied:
+            showNotice("Разреши Atoll управлять \(name): Настройки → Конфиденциальность → Автоматизация", for: source)
+        case .tabNotFound:
+            showNotice("Вкладка с этим треком не найдена", for: source)
+        case .failed:
+            showNotice("Не удалось управлять \(name)", for: source)
+        }
+    }
+
+    private func appName(_ bundle: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return "браузере" }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
+
+    /// Нажатие на подсказку: спрашиваем согласие и включаем пункт меню браузера.
+    func confirmBrowserAccess() {
+        guard let (source, action) = pendingBrowserAction else { return }
+        let name = appName(source.bundle)
+        let alert = NSAlert()
+        alert.messageText = "Разрешить Atoll управлять вкладками в \(name)?"
+        alert.informativeText = "Чтобы ставить видео на паузу, пока активен другой плеер, Atoll включит в \(name) пункт «Вид → Разработчикам → Разрешить JavaScript из событий Apple». После этого любая программа с доступом к Автоматизации сможет выполнять скрипты в твоих вкладках. Выключить пункт можно там же в любой момент."
+        alert.addButton(withTitle: "Включить")
+        alert.addButton(withTitle: "Отмена")
+        alert.window.level = .statusBar
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        model.notice = nil
+        BrowserControl.enableJavaScript(bundle: source.bundle) { [weak self] enabled in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if enabled {
+                    self.pendingBrowserAction = nil
+                    self.runBrowser(source, action)
+                    self.scheduleRefresh()
+                } else {
+                    self.showNotice("Включи вручную: Вид → Разработчикам → Разрешить JavaScript из событий Apple", for: source)
+                }
+            }
+        }
+    }
+
+    private func showNotice(_ text: String, for source: Source, actionable: Bool = false) {
+        // Показываем, только пока выбран тот же источник и трек.
+        guard current?.bundle == source.bundle, current?.title == source.title else { return }
         noticeToken += 1
         let token = noticeToken
+        noticeOwner = (source.bundle, source.title)
+        model.noticeIsActionable = actionable
         model.notice = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (actionable ? 12 : 5)) { [weak self] in
             guard let self, self.noticeToken == token else { return }
             self.model.notice = nil
         }
@@ -351,6 +404,10 @@ final class NowPlayingService {
     private func publishSelection() {
         model.setSources(sources.map(\.bundle), selected: selected)
         guard let source = current else { return }
+        if let owner = noticeOwner, owner.bundle != source.bundle || owner.title != source.title {
+            noticeOwner = nil
+            model.notice = nil
+        }
         let shownElapsed = reconcileAfterSeek(source.elapsed, playing: source.isPlaying, duration: source.duration)
         sample = Sample(duration: source.duration, elapsed: shownElapsed, rate: source.rate, takenAt: Date())
         model.needsPlayerAccess = false
@@ -421,36 +478,71 @@ enum BrowserControl {
         case seek(TimeInterval)
     }
 
-    static func run(bundle: String, title: String, action: Action, completion: @escaping (String?) -> Void) {
-        // Идентификатор попадает прямо в текст скрипта, поэтому принимаем только обычный bundle ID.
-        guard bundle.range(of: "^[A-Za-z0-9.-]{1,100}$", options: .regularExpression) != nil else {
-            completion("Неизвестное приложение")
+    enum Problem {
+        case javaScriptDisabled
+        case automationDenied
+        case tabNotFound
+        case failed
+    }
+
+    /// Идентификатор попадает прямо в текст скрипта, поэтому принимаем только обычный bundle ID.
+    private static func isSafe(_ bundle: String) -> Bool {
+        bundle.range(of: "^[A-Za-z0-9.-]{1,100}$", options: .regularExpression) != nil
+    }
+
+    /// Включает в браузере пункт «Разрешить JavaScript из событий Apple» через меню. Зовём только после согласия пользователя.
+    static func enableJavaScript(bundle: String, completion: @escaping (Bool) -> Void) {
+        guard isSafe(bundle), bundle != "com.apple.Safari" else {
+            completion(false)
+            return
+        }
+        let script = """
+        tell application "System Events"
+          tell (first process whose bundle identifier is "\(bundle)")
+            set bar to menu bar 1
+            repeat with spec in {{"Вид", "Разработчикам", "Разрешить JavaScript из событий Apple"}, {"View", "Developer", "Allow JavaScript from Apple Events"}}
+              try
+                set m to menu item (item 3 of spec) of menu 1 of menu item (item 2 of spec) of menu 1 of menu bar item (item 1 of spec) of bar
+                if (value of attribute "AXMenuItemMarkChar" of m) is missing value then click m
+                return "ok"
+              end try
+            end repeat
+          end tell
+        end tell
+        return "fail"
+        """
+        DispatchQueue.global(qos: .userInitiated).async {
+            completion(runScript(script).output.contains("ok"))
+        }
+    }
+
+    private static func runScript(_ script: String) -> (status: Int32, output: String, error: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        do { try process.run() } catch { return (-1, "", "") }
+        process.waitUntilExit()
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let error = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (process.terminationStatus, output, error)
+    }
+
+    static func run(bundle: String, title: String, action: Action, completion: @escaping (Problem?) -> Void) {
+        guard isSafe(bundle) else {
+            completion(.failed)
             return
         }
         let script = appleScript(bundle: bundle, title: title, javaScript: javaScript(for: action))
         DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", script]
-            let out = Pipe()
-            let err = Pipe()
-            process.standardOutput = out
-            process.standardError = err
-            do { try process.run() } catch {
-                completion("Не удалось управлять браузером")
-                return
-            }
-            process.waitUntilExit()
-            let errorText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let outText = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if process.terminationStatus != 0 {
-                if errorText.contains("(-1743)") {
-                    completion("Разреши Atoll управлять браузером: Настройки → Конфиденциальность → Автоматизация")
-                } else {
-                    completion("В браузере: Вид → Разработчикам → Разрешить JavaScript из событий Apple")
-                }
-            } else if outText.contains("nomatch") {
-                completion("Вкладка с этим треком не найдена")
+            let result = runScript(script)
+            if result.status != 0 {
+                completion(result.error.contains("(-1743)") ? .automationDenied : .javaScriptDisabled)
+            } else if result.output.contains("nomatch") {
+                completion(.tabNotFound)
             } else {
                 completion(nil)
             }

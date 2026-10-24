@@ -81,6 +81,7 @@ struct IslandView: View {
             .frame(width: shapeSize.width, height: shapeSize.height, alignment: .top)
             // Одна обложка «переезжает» из миниатюры в полный размер вместе с растущей формой.
             .overlay(alignment: .topLeading) { travellingArtwork }
+            .overlay(alignment: .topLeading) { travellingEqualizer }
             .background { islandFill }
             .clipShape(islandShape)
             .overlay { islandChrome }
@@ -133,9 +134,7 @@ struct IslandView: View {
         HStack(spacing: 0) {
             Color.clear.frame(width: IslandMetrics.artworkSide, height: IslandMetrics.artworkSide)
             Spacer(minLength: model.notchWidth + IslandMetrics.notchGap * 2)
-            EqualizerView(spectrum: model.spectrum, isPlaying: model.isPlaying, compact: true, leading: model.eqLeading, trailing: model.eqTrailing)
-                .opacity(model.isExpanded ? 0 : 1)
-                .animation(.easeIn(duration: 0.14), value: model.isExpanded)
+            Color.clear.frame(width: EqualizerView.compactWidth, height: 14)
         }
         .padding(.horizontal, IslandMetrics.collapsedTop + IslandMetrics.sidePad)
     }
@@ -159,15 +158,8 @@ struct IslandView: View {
                     )
                     .frame(maxWidth: .infinity)
                 Color.clear.frame(width: model.notchWidth)
-                Group {
-                    if model.hasTrack {
-                        EqualizerView(spectrum: model.spectrum, isPlaying: model.isPlaying, compact: true, leading: model.eqLeading, trailing: model.eqTrailing)
-                    } else {
-                        Color.clear
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .modifier(ContentFade(expanded: model.isExpanded))
+                Color.clear
+                    .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, -14)
             .frame(height: model.notchHeight)
@@ -183,10 +175,13 @@ struct IslandView: View {
                             .lineLimit(1)
                         Text(artistText)
                             .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .foregroundStyle(model.notice != nil && model.noticeIsActionable ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                            .lineLimit(model.notice == nil ? 1 : 2)
+                            .contentShape(Rectangle())
+                            .onTapGesture { if model.notice != nil && model.noticeIsActionable { model.onNoticeAction() } }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(RollDown(expanded: model.isExpanded, travel: rollTravel, delay: 0.02))
 
                     Spacer(minLength: 4)
 
@@ -199,6 +194,7 @@ struct IslandView: View {
                     }
                     .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .modifier(RollDown(expanded: model.isExpanded, travel: rollTravel, delay: 0.05))
 
                     Spacer(minLength: 2)
 
@@ -214,9 +210,9 @@ struct IslandView: View {
                     .frame(maxWidth: .infinity)
                     .opacity(model.hasTrack ? 1 : 0.4)
                     .allowsHitTesting(model.hasTrack)
+                    .modifier(RollDown(expanded: model.isExpanded, travel: rollTravel, delay: 0.05))
                 }
                 .frame(height: IslandMetrics.expandedArtwork)
-                .modifier(ContentFade(expanded: model.isExpanded))
             }
             .padding(.top, 14)
         }
@@ -242,6 +238,31 @@ struct IslandView: View {
             ? model.notchHeight + 14
             : (model.collapsedSize.height - side) / 2
         return artwork(side: side, radius: expanded ? 12 : 6)
+            .offset(x: x, y: y)
+            .allowsHitTesting(false)
+    }
+
+    /// Насколько выше своего места стартуют название, таймлайн и кнопки: внутри физического острова, под обрезкой формы.
+    private var rollTravel: CGFloat { model.notchHeight + 46 }
+
+    /// Эквалайзер один на оба состояния: плавно едет от «уха» свёрнутого острова к центру правого «крыла» развёрнутого.
+    private var travellingEqualizer: some View {
+        let expanded = model.isExpanded
+        let bodyWidth = expanded ? model.expandedSize.width : model.collapsedSize.width
+        let eqWidth = EqualizerView.compactWidth
+        let eqHeight: CGFloat = 14
+        let inset: CGFloat
+        if expanded {
+            let pad = IslandMetrics.expandedTop + 14
+            let wing = (bodyWidth - 2 * pad + 28 - model.notchWidth) / 2
+            inset = pad - 14 + wing + model.notchWidth + (wing - eqWidth) / 2
+        } else {
+            inset = bodyWidth - (IslandMetrics.collapsedTop + IslandMetrics.sidePad) - eqWidth
+        }
+        let x = (shapeSize.width - bodyWidth) / 2 + inset
+        let y = ((expanded ? model.notchHeight : model.collapsedSize.height) - eqHeight) / 2
+        return EqualizerView(spectrum: model.spectrum, isPlaying: model.isPlaying, compact: true, leading: model.eqLeading, trailing: model.eqTrailing)
+            .opacity(expanded && !model.hasTrack ? 0 : 1)
             .offset(x: x, y: y)
             .allowsHitTesting(false)
     }
@@ -365,6 +386,9 @@ struct EqualizerView: View {
     var trailing: NSColor
 
     private var barCount: Int { SpectrumModel.bandCount }
+
+    /// Ширина компактного эквалайзера: пять баров по 3 pt и четыре промежутка по 2,5 pt.
+    static let compactWidth: CGFloat = CGFloat(SpectrumModel.bandCount) * 3 + CGFloat(SpectrumModel.bandCount - 1) * 2.5
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isPlaying)) { timeline in
@@ -636,13 +660,18 @@ enum PreviewArtwork {
 }
 
 
-/// Содержимое развёрнутого виджета проявляется чуть позже начала роста формы и быстро гаснет при закрытии.
-private struct ContentFade: ViewModifier {
+/// Блок выкатывается сверху из области физического острова вместе с растущей формой.
+/// Положение идёт той же пружиной, что и форма, а прозрачность появляется чуть раньше, чтобы не было резкого появления.
+private struct RollDown: ViewModifier {
     var expanded: Bool
+    var travel: CGFloat
+    var delay: Double
 
     func body(content: Content) -> some View {
         content
             .opacity(expanded ? 1 : 0)
-            .animation(expanded ? .easeOut(duration: 0.26).delay(0.14) : .easeIn(duration: 0.1), value: expanded)
+            .animation(expanded ? .easeOut(duration: 0.24).delay(delay) : .easeIn(duration: 0.12), value: expanded)
+            .offset(y: expanded ? 0 : -travel)
+            .animation(expanded ? .spring(response: 0.54, dampingFraction: 0.86).delay(delay) : .easeIn(duration: 0.2), value: expanded)
     }
 }

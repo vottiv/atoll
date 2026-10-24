@@ -66,6 +66,8 @@ final class IslandModel: ObservableObject {
     @Published var selectedSource: String?
     /// Подсказка вместо строки исполнителя (например, что нужно разрешить в браузере).
     @Published var notice: String?
+    /// Подсказку можно нажать (например, чтобы разрешить управление браузером).
+    @Published var noticeIsActionable = false
     @Published var eqLeading = ArtworkPalette.neutral.0
     @Published var eqTrailing = ArtworkPalette.neutral.1
     @Published var duration: TimeInterval = 0
@@ -91,6 +93,7 @@ final class IslandModel: ObservableObject {
     var onLike: () -> Void = {}
     var onSelectSource: (String) -> Void = { _ in }
     var onOpenSource: (String) -> Void = { _ in }
+    var onNoticeAction: () -> Void = {}
     var onExpansionChange: ((Bool) -> Void)?
     /// Вызывается до раскрытия: окно должно стать большим до старта анимации формы.
     var onWillExpand: (() -> Void)?
@@ -345,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nowPlaying: NowPlayingService?
     private var outsideClickMonitor: Any?
     private var spectrumMonitor: AudioSpectrum?
+    private var demoRecorder: DemoRecorder?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -413,6 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.onLike = { [weak self] in self?.nowPlaying?.like() }
             model.onSelectSource = { [weak self] in self?.nowPlaying?.select($0) }
             model.onOpenSource = { [weak self] in self?.nowPlaying?.openSource($0) }
+            model.onNoticeAction = { [weak self] in self?.nowPlaying?.confirmBrowserAccess() }
         }
 
         if args.contains("--expanded") {
@@ -446,6 +451,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if playing { monitor.start() } else { monitor.stop() }
             }
             .store(in: &cancellables)
+        if let flag = args.firstIndex(of: "--record"), args.indices.contains(flag + 1) {
+            let recorder = DemoRecorder(model: model, panel: controller.panel, output: URL(fileURLWithPath: args[flag + 1]))
+            demoRecorder = recorder
+            recorder.run()
+        }
         if args.contains("--cycle") {
             // Отладка анимации: сам раскрывает и сворачивает островок каждые 3 секунды.
             Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in

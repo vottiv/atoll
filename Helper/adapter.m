@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
+#include <math.h>
 typedef void (^InfoBlock)(CFDictionaryRef);
 typedef void (^PlayBlock)(Boolean);
 typedef void (*GetInfoFn)(dispatch_queue_t, InfoBlock);
@@ -16,7 +17,9 @@ static void *mr(void) {
 static id jsonSafe(id v) {
     if ([v isKindOfClass:NSData.class]) return [(NSData *)v base64EncodedStringWithOptions:0];
     if ([v isKindOfClass:NSDate.class]) return @([(NSDate *)v timeIntervalSince1970]);
-    if ([v isKindOfClass:NSString.class] || [v isKindOfClass:NSNumber.class]) return v;
+    if ([v isKindOfClass:NSString.class]) return v;
+    // Для потоков вроде «Моей волны» длительность бывает бесконечной, а JSON её не принимает.
+    if ([v isKindOfClass:NSNumber.class]) { double d = [(NSNumber *)v doubleValue]; return (isinf(d) || isnan(d)) ? nil : v; }
     return nil;
 }
 void adapter_get(void *a, void *b) {

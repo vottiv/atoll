@@ -5,7 +5,7 @@
 «Динамический остров» для macOS: плавающая панель у выреза камеры, которая показывает, что играет сейчас, и даёт управлять плеером, не переключаясь в приложение.
 
 <p align="center">
-  <img src="screenshots/expanded.png" alt="Развёрнутый виджет" width="820">
+  <img src="screenshots/demo.gif" alt="Раскрытие острова" width="760">
 </p>
 
 ## Что умеет
@@ -18,8 +18,8 @@
 - **Управление.** Пауза и воспроизведение, треки вперёд и назад, перемотка по таймлайну.
 
 <p align="center">
-  <img src="screenshots/collapsed.png" alt="Свёрнутый" width="400">
-  <img src="screenshots/hovered.png" alt="При наведении" width="400">
+  <img src="screenshots/collapsed.png" alt="Свёрнутый" width="380">
+  <img src="screenshots/expanded.png" alt="Развёрнутый" width="380">
 </p>
 
 ## Требования

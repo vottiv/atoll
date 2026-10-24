@@ -27,7 +27,8 @@ swiftc \
   Sources/IslandView.swift \
   Sources/Snapshot.swift \
   Sources/MediaRemoteBridge.swift \
-  Sources/AudioSpectrum.swift
+  Sources/AudioSpectrum.swift \
+  Sources/DemoRecorder.swift
 
 mkdir -p "$APP/Contents/Resources"
 clang -dynamiclib -fobjc-arc -framework Foundation -arch arm64 -mmacosx-version-min=14.0 \
