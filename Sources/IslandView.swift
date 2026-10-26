@@ -662,7 +662,7 @@ enum PreviewArtwork {
 
 /// Блок выкатывается сверху из области физического острова вместе с растущей формой.
 /// Положение идёт той же пружиной, что и форма, а прозрачность появляется чуть раньше, чтобы не было резкого появления.
-private struct RollDown: ViewModifier {
+struct RollDown: ViewModifier {
     var expanded: Bool
     var travel: CGFloat
     var delay: Double

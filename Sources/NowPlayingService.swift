@@ -57,6 +57,7 @@ final class NowPlayingService {
         case nextTrack = 4
         case previousTrack = 5
         case like = 21
+        case dislike = 22
     }
 
     init?(model: IslandModel) {
@@ -148,7 +149,43 @@ final class NowPlayingService {
     }
 
     func like() {
-        bridge.send(command: Command.like.rawValue)
+        if current?.bundle == Self.yandexBundle {
+            react(.like)
+        } else {
+            bridge.send(command: Command.like.rawValue)
+        }
+    }
+
+    func dislike() {
+        if current?.bundle == Self.yandexBundle {
+            react(.dislike)
+        } else {
+            bridge.send(command: Command.dislike.rawValue)
+        }
+    }
+
+    /// Яндекс Музыка не отвечает на лайк из MediaRemote, поэтому жмём её кнопку в окне.
+    private func react(_ reaction: DesktopPlayerReader.Reaction) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            DesktopPlayerReader.react(reaction)
+            DispatchQueue.main.async { self?.syncReaction(after: 0.5) }
+        }
+    }
+
+    /// Подтягивает состояние лайка из окна Яндекс Музыки: само приложение его через Accessibility не отдаёт,
+    /// поэтому смотрим, закрашено ли сердечко. Дизлайк так не прочесть: после него трек пропускается.
+    func syncReaction(after delay: TimeInterval = 0.8) {
+        guard current?.bundle == Self.yandexBundle else { return }
+        let key = model.title
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let coverage = DesktopPlayerReader.reactionCoverage() else { return }
+            let liked = coverage.like > DesktopPlayerReader.filledHeartCoverage
+            DispatchQueue.main.async {
+                guard let model = self?.model, model.title == key, model.isLiked != liked else { return }
+                model.isLiked = liked
+                if liked { model.isDisliked = false }
+            }
+        }
     }
 
     func seek(to seconds: TimeInterval) {
@@ -1024,6 +1061,92 @@ enum DesktopPlayerReader {
         return found
     }
 
+    enum Reaction: String {
+        case like = "Нравится"
+        case dislike = "Не нравится"
+    }
+
+    /// Кнопки «Нравится» есть и в строках списков на странице. Нужна та, что в нижней панели плеера: самая нижняя.
+    private static func reactionBox(_ reaction: Reaction, in root: AXUIElement) -> AXUIElement? {
+        var found: [(element: AXUIElement, y: CGFloat)] = []
+        var remaining = 4000
+        func visit(_ element: AXUIElement, depth: Int) {
+            guard depth < 30, remaining > 0 else { return }
+            remaining -= 1
+            if stringAttribute(element, kAXRoleAttribute) == (kAXCheckBoxRole as String),
+               stringAttribute(element, kAXDescriptionAttribute) == reaction.rawValue,
+               let node = frame(of: element) {
+                found.append((element, node.minY))
+            }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) == .success else { return }
+            for child in axElements(value) { visit(child, depth: depth + 1) }
+        }
+        visit(root, depth: 0)
+        return found.max { $0.y < $1.y }?.element
+    }
+
+    /// Нажимает «Нравится» / «Не нравится» в нижней панели плеера: MediaRemote-команды Яндекс Музыка игнорирует.
+    /// AXPress на этих кнопках не работает, нужен настоящий клик при окне на переднем плане. Состояние кнопок
+    /// через Accessibility не читается (AXValue пуст), поэтому виджет ведёт его сам.
+    static func react(_ reaction: Reaction) {
+        guard AXIsProcessTrusted(), let window = mainWindow(), let box = reactionBox(reaction, in: window.element),
+              let target = frame(of: box) else {
+            logLine("react \(reaction.rawValue) → no-button")
+            return
+        }
+        let wasMinimized = isMinimized(window.element)
+        let previous = NSWorkspace.shared.frontmostApplication
+        showPlayerWindow(window.element)
+        let front = waitUntilFront()
+        if front {
+            let cursor = CGEvent(source: nil)?.location
+            clickPoint(CGPoint(x: target.midX, y: target.midY), flip: false)
+            Thread.sleep(forTimeInterval: 0.3)
+            if let cursor { clickPointMove(cursor) }
+        }
+        NSApp.setActivationPolicy(.accessory)
+        restoreFocus(previous, window: window.element, wasMinimized: wasMinimized)
+        logLine("react \(reaction.rawValue) front=\(front) at \(rect(target))")
+    }
+
+    /// Доля «чернил» (пикселей, заметно отличающихся от фона кнопки) внутри кадра кнопки: у закрашенной иконки она заметно больше, чем у контурной.
+    private static func inkCoverage(_ shot: WindowShot, window: CGRect, button: CGRect) -> Double {
+        let inner = button.insetBy(dx: button.width * 0.2, dy: button.height * 0.2)
+        let rect = CGRect(
+            x: (inner.minX - window.minX) * shot.scale,
+            y: (inner.minY - window.minY) * shot.scale,
+            width: inner.width * shot.scale,
+            height: inner.height * shot.scale
+        ).integral
+        guard let crop = shot.pixels.cropping(to: rect),
+              let rep = Optional(NSBitmapImageRep(cgImage: crop)), rep.pixelsWide > 2, rep.pixelsHigh > 2 else { return 0 }
+        func luma(_ x: Int, _ y: Int) -> Double {
+            guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return 0 }
+            return 0.299 * Double(color.redComponent) + 0.587 * Double(color.greenComponent) + 0.114 * Double(color.blueComponent)
+        }
+        let background = luma(0, 0)
+        var ink = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where abs(luma(x, y) - background) > 0.2 { ink += 1 }
+        }
+        return Double(ink) / Double(rep.pixelsWide * rep.pixelsHigh)
+    }
+
+    /// Закрашенное сердечко даёт ≈0,33 покрытия, контурное ≈0,16 (замер в окне 5120×2160).
+    static let filledHeartCoverage = 0.25
+
+    static func reactionCoverage() -> (like: Double, dislike: Double)? {
+        guard let window = mainWindow(),
+              let like = reactionBox(.like, in: window.element), let likeFrame = frame(of: like),
+              let dislike = reactionBox(.dislike, in: window.element), let dislikeFrame = frame(of: dislike),
+              let shot = windowImage(of: window.frame) else { return nil }
+        return (
+            inkCoverage(shot, window: window.frame, button: likeFrame),
+            inkCoverage(shot, window: window.frame, button: dislikeFrame)
+        )
+    }
+
     private static func sliderValue(in root: AXUIElement) -> String {
         guard let slider = sliderElement(in: root) else { return "" }
         return describe(slider, kAXValueAttribute)
@@ -1201,6 +1324,12 @@ enum DesktopPlayerReader {
         move.post(tap: .cghidEventTap)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    private static func clickPointMove(_ point: CGPoint) {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else { return }
+        move.post(tap: .cghidEventTap)
     }
 
     private static func click(_ frame: CGRect, flipped: Bool) {
