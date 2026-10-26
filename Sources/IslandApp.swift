@@ -74,6 +74,7 @@ final class IslandModel: ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var isPlaying = false
     @Published var isLiked = false
+    @Published var isDisliked = false
     @Published var hasTrack = false
     @Published var needsPlayerAccess = false
     @Published var isScrubbing = false
@@ -91,6 +92,9 @@ final class IslandModel: ObservableObject {
     var onPrevious: () -> Void = {}
     var onSeek: (TimeInterval) -> Void = { _ in }
     var onLike: () -> Void = {}
+    var onDislike: () -> Void = {}
+    /// Сменился трек: источник может подтянуть, лайкнут ли он уже.
+    var onTrackChange: (() -> Void)?
     var onSelectSource: (String) -> Void = { _ in }
     var onOpenSource: (String) -> Void = { _ in }
     var onNoticeAction: () -> Void = {}
@@ -170,7 +174,15 @@ final class IslandModel: ObservableObject {
     func toggleLike() {
         guard hasTrack else { return }
         isLiked.toggle()
+        if isLiked { isDisliked = false }
         onLike()
+    }
+
+    func toggleDislike() {
+        guard hasTrack else { return }
+        isDisliked.toggle()
+        if isDisliked { isLiked = false }
+        onDislike()
     }
 
     func beginScrub(ratio: Double) {
@@ -203,6 +215,8 @@ final class IslandModel: ObservableObject {
         if key != trackKey {
             trackKey = key
             isLiked = false
+            isDisliked = false
+            onTrackChange?()
         }
         self.isPlaying = isPlaying
         let appeared = !hasTrack
@@ -263,6 +277,7 @@ final class IslandModel: ObservableObject {
         elapsed = 0
         isPlaying = false
         isLiked = false
+        isDisliked = false
         hasTrack = false
         isScrubbing = false
         trackKey = ""
@@ -349,6 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outsideClickMonitor: Any?
     private var spectrumMonitor: AudioSpectrum?
     private var demoRecorder: DemoRecorder?
+    private var externalIslands: ExternalIslandManager?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -371,6 +387,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if args.contains("--press-prev") {
             DesktopPlayerReader.press(.previous)
+            exit(0)
+        }
+        if args.contains("--press-like") || args.contains("--press-dislike") {
+            DesktopPlayerReader.react(args.contains("--press-like") ? .like : .dislike)
+            exit(0)
+        }
+        if args.contains("--reaction-state") {
+            let coverage = DesktopPlayerReader.reactionCoverage()
+            print(coverage.map { String(format: "like=%.3f dislike=%.3f", $0.like, $0.dislike) } ?? "no-button")
             exit(0)
         }
         if args.contains("--media-test") {
@@ -415,6 +440,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.onPrevious = { [weak self] in self?.nowPlaying?.previous() }
             model.onSeek = { [weak self] time in self?.nowPlaying?.seek(to: time) }
             model.onLike = { [weak self] in self?.nowPlaying?.like() }
+            model.onDislike = { [weak self] in self?.nowPlaying?.dislike() }
+            model.onTrackChange = { [weak self] in self?.nowPlaying?.syncReaction() }
             model.onSelectSource = { [weak self] in self?.nowPlaying?.select($0) }
             model.onOpenSource = { [weak self] in self?.nowPlaying?.openSource($0) }
             model.onNoticeAction = { [weak self] in self?.nowPlaying?.confirmBrowserAccess() }
@@ -441,6 +468,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
         nowPlaying?.start()
         watchClicksOutside()
+        let externals = ExternalIslandManager(model: model)
+        externalIslands = externals
+        externals.start()
         // Звук снимаем только пока играет музыка.
         let monitor = AudioSpectrum(model: model.spectrum)
         spectrumMonitor = monitor
@@ -757,12 +787,16 @@ final class IslandPanel: NSPanel {
 }
 
 final class IslandContainer: NSView {
-    private let model: IslandModel
+    private let onHover: (Bool) -> Void
     private var tracking: NSTrackingArea?
 
-    init(model: IslandModel) {
-        self.model = model
+    init(onHover: @escaping (Bool) -> Void) {
+        self.onHover = onHover
         super.init(frame: .zero)
+    }
+
+    convenience init(model: IslandModel) {
+        self.init(onHover: { [unowned model] in model.setHovered($0) })
     }
 
     @available(*, unavailable)
@@ -793,11 +827,11 @@ final class IslandContainer: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        model.setHovered(true)
+        onHover(true)
     }
 
     override func mouseExited(with event: NSEvent) {
-        model.setHovered(false)
+        onHover(false)
     }
 
     override func rightMouseDown(with event: NSEvent) {
