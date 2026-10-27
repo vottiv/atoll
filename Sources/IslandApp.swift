@@ -623,14 +623,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func watchClicksOutside() {
         let handler: (NSEvent) -> Void = { [weak self] _ in
-            guard let self, self.model.isExpanded else { return }
+            guard let self, self.model.isExpanded, !DesktopPlayerReader.isClicking else { return }
             guard let panel = self.windowController?.panel else { return }
             if panel.frame.contains(NSEvent.mouseLocation) { return }
             self.model.closeWidget()
         }
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: handler)
         NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self, self.model.isExpanded, let panel = self.windowController?.panel else {
+            guard let self, self.model.isExpanded, !DesktopPlayerReader.isClicking, let panel = self.windowController?.panel else {
                 return event
             }
             let point = NSEvent.mouseLocation

@@ -1061,6 +1061,9 @@ enum DesktopPlayerReader {
         return found
     }
 
+    /// Пока true, наши же синтетические клики по окну плеера не считаются «кликом вне острова».
+    static var isClicking = false
+
     enum Reaction: String {
         case like = "Нравится"
         case dislike = "Не нравится"
@@ -1099,10 +1102,14 @@ enum DesktopPlayerReader {
         let previous = NSWorkspace.shared.frontmostApplication
         showPlayerWindow(window.element)
         let front = waitUntilFront()
-        if front {
+        // Пока окно разворачивалось, раскладка поменялась: кнопку ищем заново, иначе клик уйдёт мимо.
+        if wasMinimized { Thread.sleep(forTimeInterval: 0.6) }
+        if front, let fresh = reactionBox(reaction, in: window.element), let target = frame(of: fresh) {
             let cursor = CGEvent(source: nil)?.location
+            isClicking = true
             clickPoint(CGPoint(x: target.midX, y: target.midY), flip: false)
             Thread.sleep(forTimeInterval: 0.3)
+            isClicking = false
             if let cursor { clickPointMove(cursor) }
         }
         NSApp.setActivationPolicy(.accessory)
@@ -1111,7 +1118,7 @@ enum DesktopPlayerReader {
     }
 
     /// Доля «чернил» (пикселей, заметно отличающихся от фона кнопки) внутри кадра кнопки: у закрашенной иконки она заметно больше, чем у контурной.
-    private static func inkCoverage(_ shot: WindowShot, window: CGRect, button: CGRect) -> Double {
+    private static func inkCoverage(_ shot: WindowShot, window: CGRect, button: CGRect) -> Double? {
         let inner = button.insetBy(dx: button.width * 0.2, dy: button.height * 0.2)
         let rect = CGRect(
             x: (inner.minX - window.minX) * shot.scale,
@@ -1120,7 +1127,7 @@ enum DesktopPlayerReader {
             height: inner.height * shot.scale
         ).integral
         guard let crop = shot.pixels.cropping(to: rect),
-              let rep = Optional(NSBitmapImageRep(cgImage: crop)), rep.pixelsWide > 2, rep.pixelsHigh > 2 else { return 0 }
+              let rep = Optional(NSBitmapImageRep(cgImage: crop)), rep.pixelsWide > 2, rep.pixelsHigh > 2 else { return nil }
         func luma(_ x: Int, _ y: Int) -> Double {
             guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return 0 }
             return 0.299 * Double(color.redComponent) + 0.587 * Double(color.greenComponent) + 0.114 * Double(color.blueComponent)
@@ -1137,14 +1144,14 @@ enum DesktopPlayerReader {
     static let filledHeartCoverage = 0.25
 
     static func reactionCoverage() -> (like: Double, dislike: Double)? {
-        guard let window = mainWindow(),
+        // У свёрнутого окна нет ни снимка, ни актуальной раскладки: состояние неизвестно.
+        guard let window = mainWindow(), !isMinimized(window.element),
               let like = reactionBox(.like, in: window.element), let likeFrame = frame(of: like),
               let dislike = reactionBox(.dislike, in: window.element), let dislikeFrame = frame(of: dislike),
-              let shot = windowImage(of: window.frame) else { return nil }
-        return (
-            inkCoverage(shot, window: window.frame, button: likeFrame),
-            inkCoverage(shot, window: window.frame, button: dislikeFrame)
-        )
+              let shot = windowImage(of: window.frame),
+              let likeInk = inkCoverage(shot, window: window.frame, button: likeFrame),
+              let dislikeInk = inkCoverage(shot, window: window.frame, button: dislikeFrame) else { return nil }
+        return (likeInk, dislikeInk)
     }
 
     private static func sliderValue(in root: AXUIElement) -> String {
@@ -1495,11 +1502,9 @@ enum DesktopPlayerReader {
 
     private static func read() -> Track? {
         guard let window = mainWindow() else { return nil }
-        if isMinimized(window.element) {
-            // Свёрнутое окно отдаёт урезанное AX-дерево без названия трека.
-            showPlayerWindow(window.element)
-            Thread.sleep(forTimeInterval: 0.25)
-        }
+        // Свёрнутое окно отдаёт урезанное AX-дерево без названия трека, но разворачивать его ради чтения нельзя:
+        // при смене трека запись в MediaRemote на миг пропадает, и окно каждый раз выскакивало бы на экран.
+        if isMinimized(window.element) { return nil }
         guard let player = findPlayer(in: window.element) else { return nil }
         let info = inspect(player)
         guard !info.title.isEmpty else { return nil }
