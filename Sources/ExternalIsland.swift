@@ -453,7 +453,6 @@ final class ExternalIslandManager {
     }
 
     private func closeIfOutside() {
-        guard !DesktopPlayerReader.isClicking else { return }
         let point = NSEvent.mouseLocation
         for controller in controllers.values where controller.state.isExpanded && !controller.panel.frame.contains(point) {
             controller.state.close()

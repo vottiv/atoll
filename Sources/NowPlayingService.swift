@@ -1061,9 +1061,6 @@ enum DesktopPlayerReader {
         return found
     }
 
-    /// Пока true, наши же синтетические клики по окну плеера не считаются «кликом вне острова».
-    static var isClicking = false
-
     enum Reaction: String {
         case like = "Нравится"
         case dislike = "Не нравится"
@@ -1089,32 +1086,57 @@ enum DesktopPlayerReader {
         return found.max { $0.y < $1.y }?.element
     }
 
-    /// Нажимает «Нравится» / «Не нравится» в нижней панели плеера: MediaRemote-команды Яндекс Музыка игнорирует.
-    /// AXPress на этих кнопках не работает, нужен настоящий клик при окне на переднем плане. Состояние кнопок
-    /// через Accessibility не читается (AXValue пуст), поэтому виджет ведёт его сам.
+    /// Нажимает «Нравится» / «Не нравится» в нижней панели плеера: MediaRemote-команды Яндекс Музыка игнорирует,
+    /// AXPress и клик мышью без активации тоже. Работает фокус на чекбоксе (AXFocused) и пробел, отправленный
+    /// адресно в процесс: приложение остаётся неактивным, окно не выходит на экран. Свёрнутое окно ключевым быть
+    /// не может, поэтому его на время нажатия разворачивают за пределами экрана и сразу сворачивают обратно.
+    /// Состояние кнопок через Accessibility не читается (AXValue пуст), его ведёт виджет и сверяет по пикселям.
     static func react(_ reaction: Reaction) {
-        guard AXIsProcessTrusted(), let window = mainWindow(), let box = reactionBox(reaction, in: window.element),
-              let target = frame(of: box) else {
-            logLine("react \(reaction.rawValue) → no-button")
+        guard AXIsProcessTrusted(), let window = mainWindow() else {
+            logLine("react \(reaction.rawValue) → no-window")
             return
         }
         let wasMinimized = isMinimized(window.element)
-        let previous = NSWorkspace.shared.frontmostApplication
-        showPlayerWindow(window.element)
-        let front = waitUntilFront()
-        // Пока окно разворачивалось, раскладка поменялась: кнопку ищем заново, иначе клик уйдёт мимо.
-        if wasMinimized { Thread.sleep(forTimeInterval: 0.6) }
-        if front, let fresh = reactionBox(reaction, in: window.element), let target = frame(of: fresh) {
-            let cursor = CGEvent(source: nil)?.location
-            isClicking = true
-            clickPoint(CGPoint(x: target.midX, y: target.midY), flip: false)
-            Thread.sleep(forTimeInterval: 0.3)
-            isClicking = false
-            if let cursor { clickPointMove(cursor) }
+        var original: CGPoint?
+        if wasMinimized {
+            original = position(of: window.element)
+            setPosition(CGPoint(x: -30000, y: 200), of: window.element)
+            AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+            // Раскладка после разворачивания меняется, кнопку ищем уже в живом окне.
+            Thread.sleep(forTimeInterval: 0.5)
         }
-        NSApp.setActivationPolicy(.accessory)
-        restoreFocus(previous, window: window.element, wasMinimized: wasMinimized)
-        logLine("react \(reaction.rawValue) front=\(front) at \(rect(target))")
+        // Клавиши получает ключевое окно приложения: делаем окно главным и ключевым, не активируя само приложение.
+        AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        Thread.sleep(forTimeInterval: 0.2)
+        var pressed = false
+        if let box = reactionBox(reaction, in: window.element) {
+            AXUIElementSetAttributeValue(box, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            Thread.sleep(forTimeInterval: 0.15)
+            sendKey(49, global: false)
+            Thread.sleep(forTimeInterval: 0.15)
+            pressed = true
+        }
+        if wasMinimized {
+            AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+            Thread.sleep(forTimeInterval: 0.4)
+            if let original { setPosition(original, of: window.element) }
+        }
+        logLine("react \(reaction.rawValue) pressed=\(pressed) wasMinimized=\(wasMinimized)")
+    }
+
+    private static func position(of element: AXUIElement) -> CGPoint? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero
+        return AXValueGetValue(value as! AXValue, .cgPoint, &point) ? point : nil
+    }
+
+    private static func setPosition(_ point: CGPoint, of element: AXUIElement) {
+        var point = point
+        guard let value = AXValueCreate(.cgPoint, &point) else { return }
+        AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
     }
 
     /// Доля «чернил» (пикселей, заметно отличающихся от фона кнопки) внутри кадра кнопки: у закрашенной иконки она заметно больше, чем у контурной.
